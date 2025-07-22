@@ -10,12 +10,12 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
 
-# OpenAI Key
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 
 st.set_page_config(page_title="Resource AI Assistant", page_icon="📚", layout="wide")
 
-# Session Init
+
+# Session Initialization
 for key, default in {
     "messages": [],
     "pdf_text": "",
@@ -27,7 +27,11 @@ for key, default in {
         st.session_state[key] = default
 
 
-# --- Helper Functions ---
+# --- Helpers ---
+
+headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36"
+}
 
 def extract_text_from_pdf(uploaded_file):
     try:
@@ -38,20 +42,19 @@ def extract_text_from_pdf(uploaded_file):
         return ""
 
 
-def extract_text_auto_url(url):
-    """ First try static fetch, if fails fallback to dynamic (Selenium) """
+def extract_text_from_website(url):
     try:
-        # Static fetch first
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, "html.parser")
-            text = "\n".join([p.get_text() for p in soup.find_all('p')])
-            if text.strip():
-                return text
-        # If static fails or empty, fallback to Selenium
+        response = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(response.content, 'html.parser')
+        for tag in soup.body(["script", "style", "img", "input"]):
+            tag.decompose()
+        text = soup.body.get_text(separator="\n", strip=True)
+        if text.strip():
+            return text
     except Exception:
-        pass  # Ignore static fetch error, try Selenium next
+        pass  # Ignore static fetch errors
 
+    # Fallback to Selenium
     try:
         options = Options()
         options.add_argument("--headless")
@@ -60,29 +63,26 @@ def extract_text_auto_url(url):
 
         driver = webdriver.Chrome(options=options)
         driver.get(url)
-
         WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
         page_text = driver.find_element(By.TAG_NAME, "body").text
         driver.quit()
-
         return page_text if page_text.strip() else "No visible text found on the page."
     except Exception as e:
-        return f"Webpage Fetch Error: {e}"
+        return f"Website Fetch Error: {e}"
 
 
 def get_ai_response(prompt, context=""):
     try:
-        system_content = "You are a helpful assistant summarizing and answering based on uploaded documents or fetched webpages."
+        system_content = "You are a helpful assistant that summarizes and answers questions based on documents or webpages."
         if context:
-            system_content += f"\n\nCurrent resource context:\n{context}"
+            system_content += f"\n\nContext:\n{context}"
 
         response = openai.chat.completions.create(
             model="gpt-4-turbo",
             messages=[
                 {"role": "system", "content": system_content},
                 {"role": "user", "content": prompt},
-                *[{"role": msg["role"], "content": msg["content"]}
-                  for msg in st.session_state.messages[-6:]]
+                *[{"role": m["role"], "content": m["content"]} for m in st.session_state.messages[-6:]]
             ],
             temperature=0.7,
             max_tokens=500
@@ -98,10 +98,9 @@ with st.sidebar:
     st.title("Resource Navigator")
     st.divider()
 
-    tab1, tab2 = st.tabs(["📄 Documents", "🔗 Links"])
+    doc_tab, link_tab = st.tabs(["📄 Documents", "🔗 Links"])
 
-    # Documents
-    with tab1:
+    with doc_tab:
         uploaded_file = st.file_uploader("Upload a PDF Document", type=["pdf"])
         if uploaded_file:
             with st.spinner("Extracting text from PDF..."):
@@ -119,8 +118,7 @@ with st.sidebar:
                 st.session_state.messages.append({"role": "assistant", "content": summary})
                 st.chat_message("assistant").markdown(summary)
 
-    # Links
-    with tab2:
+    with link_tab:
         with st.form("add_link_form"):
             st.subheader("Add New Link")
             title = st.text_input("Title")
@@ -151,11 +149,11 @@ with st.sidebar:
                         st.caption(f"{link['category']}")
                     with col2:
                         if st.button("Select", key=f"select_{i}"):
-                            with st.spinner("Fetching content automatically..."):
-                                text = extract_text_auto_url(link['url'])
+                            with st.spinner("Fetching and analyzing webpage..."):
+                                text = extract_text_from_website(link['url'])
 
                                 if not text or "Error" in text or "Failed" in text:
-                                    st.warning("Could not extract meaningful content from this link.")
+                                    st.warning("Could not extract content from this link.")
                                 else:
                                     st.session_state.active_resource = {
                                         "type": "link",
@@ -164,10 +162,9 @@ with st.sidebar:
                                         "category": link['category'],
                                         "content": text[:10000]
                                     }
-                                    with st.spinner("Summarizing webpage..."):
-                                        summary = get_ai_response("Summarize this webpage.", text[:10000])
-                                        st.session_state.messages.append({"role": "assistant", "content": summary})
-                                        st.chat_message("assistant").markdown(summary)
+                                    summary = get_ai_response("Summarize this webpage.", text[:10000])
+                                    st.session_state.messages.append({"role": "assistant", "content": summary})
+                                    st.chat_message("assistant").markdown(summary)
                             st.rerun()
 
                         if st.button("❌", key=f"delete_{i}"):
@@ -175,10 +172,10 @@ with st.sidebar:
                             st.rerun()
 
 
-# --- Main Interface ---
+# --- Main Chat Interface ---
 
-resource_name = st.session_state.active_resource["name"] if st.session_state.active_resource else "No resource selected"
-st.title(f"📚 Resource AI Assistant — {resource_name}")
+current_resource = st.session_state.active_resource["name"] if st.session_state.active_resource else "No resource selected"
+st.title(f"📚 Resource AI Assistant — {current_resource}")
 
 if st.session_state.active_resource:
     with st.expander("Current Resource Details"):
@@ -194,7 +191,7 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-if prompt := st.chat_input(f"Ask about {resource_name}..."):
+if prompt := st.chat_input(f"Ask about {current_resource}..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
@@ -208,4 +205,5 @@ if prompt := st.chat_input(f"Ask about {resource_name}..."):
 
 if not st.session_state.active_resource:
     st.info("Upload a document or select a link to start.")
+
 
