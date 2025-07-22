@@ -38,20 +38,20 @@ def extract_text_from_pdf(uploaded_file):
         return ""
 
 
-def extract_text_from_static_url(url):
+def extract_text_auto_url(url):
+    """ First try static fetch, if fails fallback to dynamic (Selenium) """
     try:
+        # Static fetch first
         response = requests.get(url, timeout=10)
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, "html.parser")
             text = "\n".join([p.get_text() for p in soup.find_all('p')])
-            return text if text.strip() else "No visible text found on the page."
-        else:
-            return f"Failed to fetch URL (Status {response.status_code})"
-    except Exception as e:
-        return f"Static Webpage Error: {e}"
+            if text.strip():
+                return text
+        # If static fails or empty, fallback to Selenium
+    except Exception:
+        pass  # Ignore static fetch error, try Selenium next
 
-
-def extract_text_from_dynamic_url(url):
     try:
         options = Options()
         options.add_argument("--headless")
@@ -61,14 +61,13 @@ def extract_text_from_dynamic_url(url):
         driver = webdriver.Chrome(options=options)
         driver.get(url)
 
-        # Wait until body is loaded
         WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
         page_text = driver.find_element(By.TAG_NAME, "body").text
         driver.quit()
 
         return page_text if page_text.strip() else "No visible text found on the page."
     except Exception as e:
-        return f"Selenium Error: {e}"
+        return f"Webpage Fetch Error: {e}"
 
 
 def get_ai_response(prompt, context=""):
@@ -127,15 +126,13 @@ with st.sidebar:
             title = st.text_input("Title")
             url = st.text_input("URL")
             category = st.selectbox("Category", ["General", "Research", "Article", "Reference", "Other"])
-            mode = st.radio("Fetch Mode", ["Static (BeautifulSoup)", "Dynamic (Selenium)"])
 
             if st.form_submit_button("Add Link"):
                 if title and url:
                     st.session_state.links.append({
                         "title": title,
                         "url": url,
-                        "category": category,
-                        "mode": mode
+                        "category": category
                     })
                     st.success("Link added successfully!")
                 else:
@@ -151,14 +148,11 @@ with st.sidebar:
                     col1, col2 = st.columns([4, 1])
                     with col1:
                         st.markdown(f"**{link['title']}**  \n{link['url']}")
-                        st.caption(f"{link['category']} | {link['mode']}")
+                        st.caption(f"{link['category']}")
                     with col2:
                         if st.button("Select", key=f"select_{i}"):
-                            with st.spinner("Fetching webpage content..."):
-                                if link['mode'] == "Static (BeautifulSoup)":
-                                    text = extract_text_from_static_url(link['url'])
-                                else:
-                                    text = extract_text_from_dynamic_url(link['url'])
+                            with st.spinner("Fetching content automatically..."):
+                                text = extract_text_auto_url(link['url'])
 
                                 if not text or "Error" in text or "Failed" in text:
                                     st.warning("Could not extract meaningful content from this link.")
@@ -214,3 +208,4 @@ if prompt := st.chat_input(f"Ask about {resource_name}..."):
 
 if not st.session_state.active_resource:
     st.info("Upload a document or select a link to start.")
+
