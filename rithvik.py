@@ -1,15 +1,16 @@
 import streamlit as st
 import openai
 import PyPDF2
-from io import BytesIO
+import requests
+from bs4 import BeautifulSoup
 
 # Set OpenAI API key from Streamlit Secrets
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 
-# App title and config
+# App Config
 st.set_page_config(page_title="Resource AI Assistant", page_icon="📚", layout="wide")
 
-# Initialize session state
+# Session Initialization
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "pdf_text" not in st.session_state:
@@ -22,16 +23,31 @@ if "active_resource" not in st.session_state:
     st.session_state.active_resource = None
 
 
+# --- Helper Functions ---
+
 def extract_text_from_pdf(uploaded_file):
     try:
         pdf_reader = PyPDF2.PdfReader(uploaded_file)
         text = ""
         for page in pdf_reader.pages:
-            text += page.extract_text()
+            text += page.extract_text() or ""
         return text
     except Exception as e:
         st.error(f"Error extracting text: {e}")
         return ""
+
+
+def extract_text_from_url(url):
+    try:
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, "html.parser")
+            paragraphs = [p.get_text() for p in soup.find_all('p')]
+            return "\n".join(paragraphs)
+        else:
+            return f"Failed to fetch URL. Status code: {response.status_code}"
+    except Exception as e:
+        return f"Error fetching the webpage: {e}"
 
 
 def get_ai_response(prompt, context=""):
@@ -60,7 +76,7 @@ def get_ai_response(prompt, context=""):
         return f"Error getting AI response: {str(e)}"
 
 
-# Sidebar - Resource Management
+# --- Sidebar ---
 with st.sidebar:
     st.title("Resource Navigator")
     st.divider()
@@ -72,24 +88,23 @@ with st.sidebar:
             "Upload a document", type=["pdf"],
             help="Upload a PDF file to analyze its content"
         )
-
         if uploaded_file:
             with st.spinner("Extracting text from document..."):
-                st.session_state.pdf_text = extract_text_from_pdf(uploaded_file)
+                extracted_text = extract_text_from_pdf(uploaded_file)
+                st.session_state.pdf_text = extracted_text
                 st.session_state.pdf_name = uploaded_file.name
                 st.session_state.active_resource = {
                     "type": "document",
                     "name": uploaded_file.name,
-                    "content": st.session_state.pdf_text[:10000]
+                    "content": extracted_text[:10000]
                 }
             st.success(f"Document loaded: {uploaded_file.name}")
-            st.caption(f"Characters extracted: {len(st.session_state.pdf_text)}")
+            st.caption(f"Characters extracted: {len(extracted_text)}")
             with st.expander("Document Preview"):
-                if st.session_state.pdf_text:
+                if extracted_text:
                     st.text_area(
                         "Extracted Text",
-                        value=st.session_state.pdf_text[:2000] + (
-                            "..." if len(st.session_state.pdf_text) > 2000 else ""),
+                        value=extracted_text[:2000] + ("..." if len(extracted_text) > 2000 else ""),
                         height=300,
                         disabled=True
                     )
@@ -129,12 +144,15 @@ with st.sidebar:
                         st.caption(f"Category: {link['category']}")
                     with col2:
                         if st.button("Select", key=f"select_{i}"):
-                            st.session_state.active_resource = {
-                                "type": "link",
-                                "name": link['title'],
-                                "url": link['url'],
-                                "category": link['category']
-                            }
+                            with st.spinner("Fetching webpage content..."):
+                                page_text = extract_text_from_url(link['url'])
+                                st.session_state.active_resource = {
+                                    "type": "link",
+                                    "name": link['title'],
+                                    "url": link['url'],
+                                    "category": link['category'],
+                                    "content": page_text[:10000]
+                                }
                             st.rerun()
 
                     if st.button("❌", key=f"delete_{i}"):
@@ -142,35 +160,37 @@ with st.sidebar:
                         st.rerun()
 
 
-# Main Chat Interface
-current_resource = st.session_state.active_resource["name"] if st.session_state.active_resource else "No resource selected"
-st.title(f"📚 Resource AI Assistant - {current_resource}")
+# --- Main Chat Interface ---
+current_resource_name = (
+    st.session_state.active_resource["name"] if st.session_state.active_resource else "No resource selected"
+)
+
+st.title(f"📚 Resource AI Assistant - {current_resource_name}")
 
 if st.session_state.active_resource:
     with st.expander("Current Resource Details", expanded=False):
-        if st.session_state.active_resource["type"] == "document":
-            st.write(f"**Document:** {st.session_state.active_resource['name']}")
-            st.caption(f"{len(st.session_state.active_resource['content'])} characters available for context")
+        res = st.session_state.active_resource
+        if res["type"] == "document":
+            st.write(f"**Document:** {res['name']}")
+            st.caption(f"{len(res['content'])} characters available for context")
         else:
-            st.write(f"**Link:** {st.session_state.active_resource['name']}")
-            st.write(f"**URL:** {st.session_state.active_resource['url']}")
-            st.write(f"**Category:** {st.session_state.active_resource['category']}")
+            st.write(f"**Link:** {res['name']}")
+            st.write(f"**URL:** {res['url']}")
+            st.write(f"**Category:** {res['category']}")
+            st.caption(f"{len(res['content'])} characters fetched from webpage")
 
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-if prompt := st.chat_input(f"Ask about {current_resource}..."):
+if prompt := st.chat_input(f"Ask about {current_resource_name}..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
     context = ""
     if st.session_state.active_resource:
-        if st.session_state.active_resource["type"] == "document":
-            context = st.session_state.active_resource["content"]
-        else:
-            context = f"Link: {st.session_state.active_resource['name']}\nURL: {st.session_state.active_resource['url']}"
+        context = st.session_state.active_resource.get("content", "")
 
     with st.chat_message("assistant"):
         with st.spinner("Analyzing..."):
@@ -181,3 +201,4 @@ if prompt := st.chat_input(f"Ask about {current_resource}..."):
 
 if not st.session_state.active_resource:
     st.info("Please upload a document or select a link in the sidebar to begin chatting with the AI")
+
