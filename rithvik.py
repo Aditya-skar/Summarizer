@@ -3,14 +3,16 @@ import openai
 import PyPDF2
 import requests
 from bs4 import BeautifulSoup
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+import time
 
-# Set OpenAI API key
+# Set OpenAI API Key
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 
-# App Config
 st.set_page_config(page_title="Resource AI Assistant", page_icon="📚", layout="wide")
 
-# Session State Initialization
+# Session State Init
 for key, default in {
     "messages": [],
     "pdf_text": "",
@@ -29,11 +31,11 @@ def extract_text_from_pdf(uploaded_file):
         reader = PyPDF2.PdfReader(uploaded_file)
         return "".join([page.extract_text() or "" for page in reader.pages])
     except Exception as e:
-        st.error(f"PDF Extraction Error: {e}")
+        st.error(f"PDF Error: {e}")
         return ""
 
 
-def extract_text_from_url(url):
+def extract_text_from_static_url(url):
     try:
         response = requests.get(url, timeout=10)
         if response.status_code == 200:
@@ -42,12 +44,29 @@ def extract_text_from_url(url):
         else:
             return f"Failed to fetch URL (Status {response.status_code})"
     except Exception as e:
-        return f"Error fetching webpage: {e}"
+        return f"Error fetching static webpage: {e}"
+
+
+def extract_text_from_dynamic_url(url):
+    try:
+        options = Options()
+        options.add_argument("--headless")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+
+        driver = webdriver.Chrome(options=options)
+        driver.get(url)
+        time.sleep(3)  # Wait for JS
+        page_text = driver.find_element("tag name", "body").text
+        driver.quit()
+        return page_text
+    except Exception as e:
+        return f"Error fetching dynamic webpage with Selenium: {e}"
 
 
 def get_ai_response(prompt, context=""):
     try:
-        system_content = "You are a helpful assistant summarizing and answering based on documents or web content."
+        system_content = "You are a helpful assistant that summarizes and answers based on uploaded documents or fetched webpages."
         if context:
             system_content += f"\n\nCurrent resource context:\n{context}"
 
@@ -67,116 +86,110 @@ def get_ai_response(prompt, context=""):
         return f"AI Error: {e}"
 
 
-# --- Sidebar: Resource Management ---
+# --- Sidebar ---
+
 with st.sidebar:
     st.title("Resource Navigator")
     st.divider()
 
-    tabs = st.tabs(["📄 Documents", "🔗 Links"])
+    tab1, tab2 = st.tabs(["📄 Documents", "🔗 Links"])
 
-    # --- Documents Tab ---
-    with tabs[0]:
-        uploaded_file = st.file_uploader("Upload a PDF Document", type=["pdf"])
+    with tab1:
+        uploaded_file = st.file_uploader("Upload a PDF", type=["pdf"])
 
         if uploaded_file:
-            with st.spinner("Extracting text from document..."):
-                pdf_text = extract_text_from_pdf(uploaded_file)
-                st.session_state.pdf_text = pdf_text
+            with st.spinner("Extracting text from PDF..."):
+                text = extract_text_from_pdf(uploaded_file)
+                st.session_state.pdf_text = text
                 st.session_state.pdf_name = uploaded_file.name
                 st.session_state.active_resource = {
                     "type": "document",
                     "name": uploaded_file.name,
-                    "content": pdf_text[:10000]
+                    "content": text[:10000]
                 }
-
             st.success(f"Document loaded: {uploaded_file.name}")
-            st.caption(f"Characters extracted: {len(pdf_text)}")
-
-            with st.expander("Document Preview"):
-                st.text_area("Extracted Text",
-                             value=pdf_text[:2000] + ("..." if len(pdf_text) > 2000 else ""),
-                             height=300, disabled=True)
-
-            with st.spinner("Summarizing document..."):
-                summary = get_ai_response("Summarize this document.", pdf_text[:10000])
+            with st.spinner("Summarizing..."):
+                summary = get_ai_response("Summarize this document.", text[:10000])
                 st.session_state.messages.append({"role": "assistant", "content": summary})
                 st.chat_message("assistant").markdown(summary)
 
-    # --- Links Tab ---
-    with tabs[1]:
+    with tab2:
         with st.form("add_link_form"):
             st.subheader("Add New Link")
-            link_title = st.text_input("Title")
-            link_url = st.text_input("URL")
-            link_category = st.selectbox("Category", ["General", "Research", "Article", "Reference", "Other"])
+            title = st.text_input("Title")
+            url = st.text_input("URL")
+            category = st.selectbox("Category", ["General", "Research", "Article", "Reference", "Other"])
+            mode = st.radio("Fetch Mode", ["Static (BeautifulSoup)", "Dynamic (Selenium)"])
 
             if st.form_submit_button("Add Link"):
-                if link_url and link_title:
+                if title and url:
                     st.session_state.links.append({
-                        "title": link_title,
-                        "url": link_url,
-                        "category": link_category
+                        "title": title,
+                        "url": url,
+                        "category": category,
+                        "mode": mode
                     })
                     st.success("Link added successfully!")
                 else:
-                    st.warning("Provide both title and URL")
+                    st.warning("Please fill in both Title and URL")
 
         st.divider()
         st.subheader("Saved Links")
         if not st.session_state.links:
-            st.info("No links saved yet")
+            st.info("No links saved")
         else:
             for i, link in enumerate(st.session_state.links):
                 with st.container(border=True):
                     col1, col2 = st.columns([4, 1])
                     with col1:
                         st.markdown(f"**{link['title']}**  \n{link['url']}")
-                        st.caption(f"Category: {link['category']}")
+                        st.caption(f"{link['category']} | {link['mode']}")
                     with col2:
                         if st.button("Select", key=f"select_{i}"):
-                            with st.spinner("Fetching webpage content..."):
-                                page_text = extract_text_from_url(link['url'])
+                            with st.spinner("Fetching content..."):
+                                if link['mode'] == "Static (BeautifulSoup)":
+                                    text = extract_text_from_static_url(link['url'])
+                                else:
+                                    text = extract_text_from_dynamic_url(link['url'])
+
                                 st.session_state.active_resource = {
                                     "type": "link",
                                     "name": link['title'],
                                     "url": link['url'],
                                     "category": link['category'],
-                                    "content": page_text[:10000]
+                                    "content": text[:10000]
                                 }
 
                                 with st.spinner("Summarizing webpage..."):
-                                    summary = get_ai_response("Summarize this webpage.", page_text[:10000])
+                                    summary = get_ai_response("Summarize this webpage.", text[:10000])
                                     st.session_state.messages.append({"role": "assistant", "content": summary})
                                     st.chat_message("assistant").markdown(summary)
                             st.rerun()
 
-                    if st.button("❌", key=f"delete_{i}"):
-                        st.session_state.links.pop(i)
-                        st.rerun()
+                        if st.button("❌", key=f"delete_{i}"):
+                            st.session_state.links.pop(i)
+                            st.rerun()
 
 
 # --- Main Chat Interface ---
+
 resource_name = st.session_state.active_resource["name"] if st.session_state.active_resource else "No resource selected"
-st.title(f"📚 Resource AI Assistant - {resource_name}")
+st.title(f"📚 Resource AI Assistant — {resource_name}")
 
 if st.session_state.active_resource:
-    with st.expander("Current Resource Details", expanded=False):
+    with st.expander("Current Resource Details"):
         res = st.session_state.active_resource
         if res["type"] == "document":
             st.write(f"**Document:** {res['name']}")
-            st.caption(f"{len(res['content'])} characters loaded")
         else:
-            st.write(f"**Link:** {res['name']}")
-            st.write(f"**URL:** {res['url']}")
+            st.write(f"**Link:** {res['name']} — {res['url']}")
             st.write(f"**Category:** {res['category']}")
-            st.caption(f"{len(res['content'])} characters fetched")
+        st.caption(f"{len(res['content'])} characters loaded")
 
-# Display chat history
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# Chat Input Handler
 if prompt := st.chat_input(f"Ask about {resource_name}..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
@@ -185,10 +198,10 @@ if prompt := st.chat_input(f"Ask about {resource_name}..."):
     context = st.session_state.active_resource.get("content", "") if st.session_state.active_resource else ""
     with st.chat_message("assistant"):
         with st.spinner("Analyzing..."):
-            response = get_ai_response(prompt, context)
-        st.markdown(response)
-
-    st.session_state.messages.append({"role": "assistant", "content": response})
+            reply = get_ai_response(prompt, context)
+        st.markdown(reply)
+    st.session_state.messages.append({"role": "assistant", "content": reply})
 
 if not st.session_state.active_resource:
     st.info("Upload a document or select a link to begin interacting with the AI.")
+
